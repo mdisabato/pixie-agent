@@ -24,6 +24,7 @@ def _run_vcgencmd(*args: str) -> str | None:
             capture_output=True,
             text=True,
             check=True,  # raise CalledProcessError on non‑zero exit
+            timeout=2,   # a hung vcgencmd must not stall the collection loop
         )
         return result.stdout.strip()
     except Exception:
