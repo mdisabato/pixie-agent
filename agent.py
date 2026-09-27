@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import ssl
+import sys
 import threading
 
 import yaml
