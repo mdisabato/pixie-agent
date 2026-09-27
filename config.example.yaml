@@ -15,11 +15,17 @@ mqtt:
 homeassistant:
   discovery_prefix: homeassistant
 #
+# How often each collector runs. Omitted collectors use the top-level
+# "interval" (default 60). protonvpn defaults to the system interval.
 collectors:
   system:
     interval_seconds: 10
   disk:
     interval_seconds: 300
+  protonvpn:
+    interval_seconds: 10
+  services:
+    interval_seconds: 60
   script:
     interval_seconds: 30
   docker:

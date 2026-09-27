@@ -29,7 +29,11 @@ class Agent:
         self._connected = threading.Event()
         self.config = config
         self.device = config["device"]["name"]
-        self.interval = config.get("interval", 60)
+        self.collectors = self._collector_schedule(config)
+
+        # Latest values per topic, merged across collectors
+        self._state = {}
+        self._service_state = {}
 
         # runtime state
         self.running = False
@@ -305,6 +309,69 @@ class Agent:
 
         return "shutdown"
 
+    # ---------- Collection ----------
+
+    def _collector_schedule(self, config):
+        """Build (name, module, topic, interval_seconds) for each collector.
+
+        Intervals come from collectors.<name>.interval_seconds in config.yaml,
+        falling back to the top-level "interval" (default 60). protonvpn is
+        published alongside the system metrics, so it defaults to the system
+        interval.
+        """
+        default = config.get("interval", 60)
+        collectors_cfg = config.get("collectors") or {}
+
+        def interval(name, fallback):
+            return (collectors_cfg.get(name) or {}).get("interval_seconds", fallback)
+
+        system_interval = interval("system", default)
+        return [
+            ("system",    system_metrics,    "state",    system_interval),
+            ("disk",      disk_metrics,      "state",    interval("disk", default)),
+            ("protonvpn", protonvpn_metrics, "state",    interval("protonvpn", system_interval)),
+            ("services",  service_metrics,   "services", interval("services", default)),
+        ]
+
+    def _run_collectors(self, due):
+        """Run the due collectors and publish the topics they feed.
+
+        Results are merged into cached payloads, so a publish always carries
+        the latest value of every metric — including those from collectors
+        that weren't due this time.
+        """
+        cycle_start = time.time()
+        ran = set()
+
+        for name, module, topic, _ in due:
+            try:
+                data = module.collect(self)
+            except Exception as e:
+                logging.error(f"{name} collection failed: {e}")
+                continue
+            if topic == "state":
+                self._state.update(data)
+            else:
+                self._service_state = data
+            ran.add(topic)
+
+        try:
+            if "state" in ran:
+                self._state["agent_cycle_ms"] = round((time.time() - cycle_start) * 1000, 1)
+                self.mqtt.publish(self.state_topic, self.json(self._state), retain=True)
+
+            # Service metrics on separate topic
+            if "services" in ran:
+                self.mqtt.publish(
+                    self.service_state_topic,
+                    self.json(self._service_state),
+                    retain=True,
+                )
+
+            logging.debug(f"published {sorted(ran)} ({len(self._state)} metrics)")
+        except Exception as e:
+            logging.error(f"Publish failed: {e}")
+
     # ---------- Signal handling ----------
 
     def _handle_signal(self, signum, frame):
@@ -337,40 +404,29 @@ class Agent:
 
         self.running = True
 
+        logging.info(
+            "collector intervals: "
+            + ", ".join(f"{name}={interval}s" for name, _, _, interval in self.collectors)
+        )
+
+        # Every collector is due immediately so the first publish is complete
+        next_run = {name: 0.0 for name, _, _, _ in self.collectors}
+
         while self.running:
-            try:
-                cycle_start = time.time()
+            now = time.monotonic()
+            due = [c for c in self.collectors if now >= next_run[c[0]]]
 
-                payload = {}
-                payload.update(system_metrics.collect(self))
-                payload.update(disk_metrics.collect(self))
-                payload.update(protonvpn_metrics.collect(self))
+            if due:
+                self._run_collectors(due)
+                for name, _, _, interval in due:
+                    next_run[name] = now + interval
 
-                payload["agent_cycle_ms"] = round((time.time() - cycle_start) * 1000, 1)
-
-                self.mqtt.publish(
-                    self.state_topic,
-                    self.json(payload),
-                    retain=True,
-                )
-
-                # Service metrics on separate topic
-                service_payload = service_metrics.collect(self)
-                self.mqtt.publish(
-                    self.service_state_topic,
-                    self.json(service_payload),
-                    retain=True,
-                )
-
-                logging.info(f"state published ({len(payload)} metrics)")
-            except Exception as e:
-                logging.error(f"Collection cycle failed: {e}")
-
-            # Interruptible sleep — exits within 1 second of SIGTERM
-            for _ in range(self.interval):
-                if not self.running:
-                    break
-                time.sleep(1)
+            # Interruptible sleep until the next collector is due —
+            # exits within 1 second of SIGTERM
+            wait = min(next_run.values()) - time.monotonic()
+            while self.running and wait > 0:
+                time.sleep(min(1.0, wait))
+                wait -= 1.0
 
         # Graceful shutdown — detect why and publish final status
         state = self._check_system_state()
