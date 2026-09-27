@@ -7,7 +7,7 @@ Entities:
                             connection (activated/not) — NM's own self-report,
                             not independently verified against actual traffic
   - protonvpn_server      : nmcli connection NAME, same query, same loop
-  - protonvpn_app_running : pgrep check on the GUI process
+  - protonvpn_app_running : process check on the GUI app (psutil, cached PID)
   - protonvpn_rx_rate     : download rate (B/s), sysfs byte-counter delta
   - protonvpn_tx_rate     : upload rate (B/s), sysfs byte-counter delta
 
@@ -43,7 +43,12 @@ import logging
 import subprocess
 import time
 
+import psutil
+
 APP_PROCESS_MATCH = "/usr/bin/protonvpn-app"
+
+# Last process seen matching APP_PROCESS_MATCH (psutil.Process or None)
+_app_proc = None
 
 # Holds the previous sample per interface for rate calculation:
 # {iface: {"rx": int, "tx": int, "time": float}}
@@ -193,15 +198,35 @@ def collect(agent):
 
 # ---------- Helpers ----------
 
+def _cmdline_matches(proc) -> bool:
+    return APP_PROCESS_MATCH in " ".join(proc.cmdline())
+
+
 def _app_process_running() -> bool:
+    """Equivalent of `pgrep -f APP_PROCESS_MATCH`, done in-process.
+
+    The last matching process is remembered, so the common case (app still
+    running) is a single /proc read instead of forking pgrep, which reads
+    status/stat/cmdline for every process on the system. A full scan only
+    happens when the app isn't running or has restarted.
+    """
+    global _app_proc
     try:
-        result = subprocess.run(
-            ["pgrep", "-f", APP_PROCESS_MATCH],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return result.returncode == 0
+        if _app_proc is not None and _app_proc.is_running() and _cmdline_matches(_app_proc):
+            return True
+    except psutil.Error:
+        pass
+    _app_proc = None
+
+    try:
+        for proc in psutil.process_iter():
+            try:
+                if _cmdline_matches(proc):
+                    _app_proc = proc
+                    return True
+            except psutil.Error:
+                continue  # exited mid-scan, or kernel thread / no access
+        return False
     except Exception as e:
         logging.error(f"Failed to check protonvpn-app process: {e}")
         return False
