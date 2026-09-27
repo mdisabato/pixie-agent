@@ -1,0 +1,16 @@
+[Unit]
+Description=Pixie Agent - Docker Monitoring
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/pixie-agent/agent_docker.py
+Restart=on-failure
+RestartSec=10
+User=root
+WorkingDirectory=/opt/pixie-agent
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=Pixie Agent - System Update Check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/pixie-agent/agent_updates.py
+User=root
+WorkingDirectory=/opt/pixie-agent
+
+[Install]
+WantedBy=multi-user.target

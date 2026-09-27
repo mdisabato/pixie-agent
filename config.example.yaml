@@ -1,0 +1,51 @@
+# pixie-agent configuration
+# Copy to config.yaml (same directory as agent.py) and fill in your values.
+#
+device:
+  name: my-pi                         # device name shown in Home Assistant
+#
+mqtt:
+  broker: mqtt.example.lan            # hostname or IP of your MQTT broker
+  port: 8883                          # 8883 for TLS, 1883 for plain
+  tls:
+    ca_cert: /opt/pixie-agent/ca.crt  # CA that signed the broker's certificate
+  username: CHANGE_ME
+  password: CHANGE_ME
+#
+homeassistant:
+  discovery_prefix: homeassistant
+#
+collectors:
+  system:
+    interval_seconds: 10
+  disk:
+    interval_seconds: 300
+  script:
+    interval_seconds: 30
+  docker:
+    interval_seconds: 15
+  updates:
+    interval_minutes: 1440
+#
+# Update-check agent (agent_updates.py)
+updates:
+  timezone: UTC                       # e.g. America/New_York
+  log_dir: /var/log/pixie-agent       # where <hostname>.chk_updates.log is written
+#
+# Mount points to report on: display name -> path
+mounts:
+  Root: /
+  Data: /mnt/data
+#
+# systemd units to report on
+services:
+  - pixie-agent
+  - pixie-docker
+  - docker
+#
+# Commands accepted over MQTT (set to false to disable)
+commands:
+  allow_reboot: false
+  allow_shutdown: false
+  allow_check: true
+  allow_update: false

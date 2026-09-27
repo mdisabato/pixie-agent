@@ -1,0 +1,19 @@
+[Unit]
+Description=Pixie Agent - System Monitoring
+After=network-online.target
+Wants=network-online.target
+# No start limit: RestartSteps backs off instead of giving up during broker outages
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/pixie-agent/agent.py
+Restart=on-failure
+RestartSec=10
+RestartSteps=5
+RestartMaxDelaySec=5min
+User=root
+WorkingDirectory=/opt/pixie-agent
+
+[Install]
+WantedBy=multi-user.target
