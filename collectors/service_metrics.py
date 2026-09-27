@@ -120,9 +120,10 @@ def collect(agent):
     services = agent.config.get("services", [])
     any_down = False
 
-    for service in services:
+    statuses = _check_services(services)
+
+    for service, status in zip(services, statuses):
         safe = _safe(service)
-        status = _check_service(service)
         data[f"service_{safe}"] = status
 
         if status != "active":
@@ -135,6 +136,35 @@ def collect(agent):
 
 
 # ---------- Helpers ----------
+
+
+def _check_services(services: list[str]) -> list[str]:
+    """Check all services with a single `systemctl is-active a b c ...`.
+
+    systemctl prints one state per unit, in argument order. If the output
+    doesn't line up with the request (e.g. systemctl rejected a unit name
+    and bailed), fall back to checking each service on its own so every
+    listed service still gets a status.
+    """
+    if not services:
+        return []
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", *(f"{s}.service" for s in services)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        states = result.stdout.split()
+        if len(states) == len(services):
+            return states
+        logging.warning(
+            f"systemctl is-active returned {len(states)} states for "
+            f"{len(services)} services; checking individually"
+        )
+    except Exception as e:
+        logging.error(f"Failed to check services: {e}")
+    return [_check_service(s) for s in services]
 
 
 def _check_service(service_name: str) -> str:
