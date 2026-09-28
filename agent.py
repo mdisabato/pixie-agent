@@ -17,6 +17,7 @@ from collectors import protonvpn_metrics
 from collectors import system_metrics
 from collectors import disk_metrics
 from collectors import service_metrics
+from collectors import genmon_watchdog
 from controllers.rpi_commands import COMMAND_REGISTRY
 
 
@@ -119,17 +120,9 @@ class Agent:
         logging.info(f"Subscribed to {self.command_topic}")
 
         # Publish Home Assistant discovery
-        system_metrics.publish_discovery(self)
-        logging.info("system discovery published")
-
-        disk_metrics.publish_discovery(self)
-        logging.info("disk discovery published")
-
-        service_metrics.publish_discovery(self)
-        logging.info("service discovery published")
-
-        protonvpn_metrics.publish_discovery(self)
-        logging.info("protonvpn discovery published")
+        for name, module, _, _ in self.collectors:
+            module.publish_discovery(self)
+            logging.info(f"{name} discovery published")
 
         self._publish_status_discovery()
         logging.info("status discovery published")
@@ -156,6 +149,13 @@ class Agent:
         })
         logging.info("command status: online")
 
+    def _command_allowed(self, action: str) -> bool:
+        """commands.allow_<action> from config.yaml. A missing key (or a
+        missing commands: section) means allowed, so existing configs keep
+        working; set a key to false to refuse that command on this host."""
+        commands_cfg = self.config.get("commands") or {}
+        return commands_cfg.get(f"allow_{action}", True) is not False
+
     def _on_message(self, client, userdata, msg):
         """Receive command message and dispatch to registry handler in a thread."""
         try:
@@ -164,7 +164,18 @@ class Agent:
             logging.info(f"Command received: {action} from {payload.get('host', 'unknown')}")
 
             handler = COMMAND_REGISTRY.get(action)
-            if handler:
+            if handler and not self._command_allowed(action):
+                logging.warning(f"Command refused: {action} (commands.allow_{action} is false)")
+                self.publish_command_status({
+                    "host":            payload.get("host", self.device),
+                    "command":         action,
+                    "status":          "error",
+                    "step":            "complete",
+                    "message":         f"Command disabled on this host: {action}",
+                    "notification_id": payload.get("notification_id", ""),
+                    "trace":           payload.get("trace", False),
+                })
+            elif handler:
                 # Run in thread — handlers can be long-running (apt-get, etc.)
                 thread = threading.Thread(
                     target=handler,
@@ -316,9 +327,14 @@ class Agent:
         """Build (name, module, topic, interval_seconds) for each collector.
 
         Intervals come from collectors.<name>.interval_seconds in config.yaml,
-        falling back to the top-level "interval" (default 60). protonvpn is
-        published alongside the system metrics, so it defaults to the system
-        interval.
+        falling back to the top-level "interval" (default 60).
+
+        system, disk and services always run. Optional collectors run only
+        when their section is present under collectors: (even if empty):
+          - protonvpn: published with the system metrics, so it defaults to
+            the system interval
+          - genmon_watchdog: published with the service metrics, so it
+            defaults to the services interval
         """
         default = config.get("interval", 60)
         collectors_cfg = config.get("collectors") or {}
@@ -327,12 +343,22 @@ class Agent:
             return (collectors_cfg.get(name) or {}).get("interval_seconds", fallback)
 
         system_interval = interval("system", default)
-        return [
-            ("system",    system_metrics,    "state",    system_interval),
-            ("disk",      disk_metrics,      "state",    interval("disk", default)),
-            ("protonvpn", protonvpn_metrics, "state",    interval("protonvpn", system_interval)),
-            ("services",  service_metrics,   "services", interval("services", default)),
+        services_interval = interval("services", default)
+        schedule = [
+            ("system",   system_metrics,  "state",    system_interval),
+            ("disk",     disk_metrics,    "state",    interval("disk", default)),
+            ("services", service_metrics, "services", services_interval),
         ]
+        if "protonvpn" in collectors_cfg:
+            schedule.append(
+                ("protonvpn", protonvpn_metrics, "state", interval("protonvpn", system_interval))
+            )
+        if "genmon_watchdog" in collectors_cfg:
+            schedule.append(
+                ("genmon_watchdog", genmon_watchdog, "services",
+                 interval("genmon_watchdog", services_interval))
+            )
+        return schedule
 
     def _run_collectors(self, due):
         """Run the due collectors and publish the topics they feed.
@@ -353,7 +379,7 @@ class Agent:
             if topic == "state":
                 self._state.update(data)
             else:
-                self._service_state = data
+                self._service_state.update(data)
             ran.add(topic)
 
         try:

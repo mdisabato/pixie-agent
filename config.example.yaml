@@ -15,17 +15,19 @@ mqtt:
 homeassistant:
   discovery_prefix: homeassistant
 #
-# How often each collector runs. Omitted collectors use the top-level
-# "interval" (default 60). protonvpn defaults to the system interval.
+# How often each collector runs. Omitted intervals use the top-level
+# "interval" (default 60). system, disk and services always run; the
+# optional collectors (protonvpn, genmon_watchdog) run only when their
+# section is present here -- an empty section ({}) is enough.
 collectors:
   system:
-    interval_seconds: 10
+    interval_seconds: 15
   disk:
     interval_seconds: 300
-  protonvpn:
-    interval_seconds: 10
   services:
     interval_seconds: 60
+  # protonvpn: {}           # Proton VPN app/tunnel state; defaults to the system interval
+  # genmon_watchdog: {}     # genmon process watchdog (restarts genmon.service); defaults to the services interval
   script:
     interval_seconds: 30
   docker:
@@ -49,7 +51,8 @@ services:
   - pixie-docker
   - docker
 #
-# Commands accepted over MQTT (set to false to disable)
+# Commands accepted over MQTT on upd_control/<device>/command.
+# A command whose allow_* is false is refused; a missing key means allowed.
 commands:
   allow_reboot: false
   allow_shutdown: false
