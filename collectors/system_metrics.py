@@ -89,10 +89,15 @@ def publish_discovery(agent) -> None:
 
         # System
         "last_boot":      ("Last Boot", None, "timestamp", None, "clock"),
+
+        # Share of total CPU used by Claude and Chrome processes (job activity)
+        "job_cpu":        ("Claude/Chrome CPU", "%", None, "measurement", "robot"),
     }
 
     binary_sensors = {
         "power_status": ("Under Voltage", "problem", "alert"),
+        "throttled": ("Throttled", "problem", "speedometer-slow"),
+        "throttled_since_boot": ("Throttled Since Boot", "problem", "history"),
     }
 
     for key, (name, unit, device_class, state_class, icon) in sensors.items():
@@ -206,6 +211,15 @@ def collect(agent) -> dict:
 
     # Undervoltage / power status (binary_sensor expects ON/OFF)
     data["power_status"] = "ON" if _get_rpi_undervoltage() else "OFF"
+
+    # Throttling: now (freq capped, throttled, soft temp limit) and since boot
+    # (the same, plus under-voltage), from the same get_throttled bits
+    thr = _get_throttled_bits()
+    data["throttled"] = "ON" if thr is not None and thr & 0xE else "OFF"
+    data["throttled_since_boot"] = "ON" if thr is not None and thr & 0xF0000 else "OFF"
+
+    # Claude/Chrome activity as a share of total CPU capacity
+    data["job_cpu"] = _read_job_cpu()
 
     # Agent uptime
     data["agent_uptime"] = int(time.time() - agent.start_time)
@@ -339,3 +353,41 @@ def _get_rpi_undervoltage() -> bool:
         return bool(value & 0x1)
     except Exception:
         return False
+
+def _get_throttled_bits() -> int | None:
+    out = _run_vcgencmd("get_throttled")
+    if not out:
+        return None
+    try:
+        return int(out.split("=")[1], 16)
+    except Exception:
+        return None
+
+
+# Process objects kept between calls so cpu_percent() measures a real interval
+_job_procs: dict = {}
+_JOB_KEYS = ("claude", "chrome", "chromium")
+
+
+def _read_job_cpu() -> float:
+    total = 0.0
+    seen = set()
+    for p in psutil.process_iter(["name", "exe"]):
+        try:
+            name = (p.info.get("name") or "").lower()
+            exe = (p.info.get("exe") or "").lower()
+            if not any(k in name or k in exe for k in _JOB_KEYS):
+                continue
+            seen.add(p.pid)
+            known = _job_procs.get(p.pid)
+            if known is None:
+                _job_procs[p.pid] = p
+                p.cpu_percent(None)  # first call primes the counter
+                continue
+            total += known.cpu_percent(None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    for pid in list(_job_procs):
+        if pid not in seen:
+            _job_procs.pop(pid, None)
+    return round(total / (psutil.cpu_count() or 1), 1)
