@@ -431,7 +431,7 @@ def publish_metrics():
             mqtt_publish(security_attributes_topic, json.dumps({"updates": security_updates}))
             logger.info('Published security_updates attributes')
         else:
-            mqtt_publish(security_attributes_topic, '')
+            mqtt_publish(security_attributes_topic, json.dumps({"updates": []}))
             logger.info('Cleared security_updates attributes')
 
         # Software update attributes
@@ -440,7 +440,7 @@ def publish_metrics():
             mqtt_publish(software_attributes_topic, json.dumps({"updates": software_updates}))
             logger.info('Published software_updates attributes')
         else:
-            mqtt_publish(software_attributes_topic, '')
+            mqtt_publish(software_attributes_topic, json.dumps({"updates": []}))
             logger.info('Cleared software_updates attributes')
 
     except Exception as e:
