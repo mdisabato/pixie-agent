@@ -291,8 +291,13 @@ def get_last_updated_time():
         return now.strftime('%Y-%m-%dT%H:%M:%S%z')
 
 def clean_version(version):
-    """Clean up package version string by removing suffix after tilde."""
-    return version.split('~')[0] if '~' in version else version
+    """Return the package version as apt reports it.
+
+    Keep everything after a tilde: Debian security fixes differ only there
+    (3.2.12-1~deb13u1 -> 3.2.12-1~deb13u2), so trimming it made the installed
+    and available versions look the same.
+    """
+    return version.strip()
 
 def check_reboot_required():
     """Check if system reboot is required."""
