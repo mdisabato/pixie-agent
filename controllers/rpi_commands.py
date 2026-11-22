@@ -15,7 +15,10 @@ agent.py imports this registry and dispatches accordingly.
 import subprocess
 import logging
 import os
+import time
 from datetime import datetime
+
+from collectors import borgmatic_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +186,66 @@ def handle_shutdown(payload, publish_fn):
         _status(publish_fn, payload, "error", "complete", str(e))
 
 
+BACKUP_TIMEOUT = 6 * 3600   # stop reporting on a backup after this long
+
+
+def handle_backup(payload, publish_fn):
+    """
+    Start a borgmatic job now, through its own systemd unit, then report
+    how it ended. payload["job"] names the job (default "hourly"); only the
+    jobs listed under collectors.borgmatic.jobs in config.yaml can start.
+    Refuses while any borgmatic job is running, since they share a repository.
+    """
+    jobs = borgmatic_metrics.JOBS
+    job = str(payload.get("job") or "hourly").lower()
+    if job not in jobs:
+        known = ", ".join(sorted(jobs)) or "none configured"
+        _status(publish_fn, payload, "error", "complete",
+                f"No borgmatic job named {job!r} (jobs: {known})")
+        return
+
+    busy = [name for name, cfg in jobs.items()
+            if borgmatic_metrics.unit_result(cfg["unit"])[1]]
+    if busy:
+        _status(publish_fn, payload, "error", "complete",
+                f"Backup not started: {', '.join(busy)} job is already running")
+        return
+
+    unit = jobs[job]["unit"]
+    try:
+        subprocess.run(["systemctl", "start", "--no-block", unit],
+                       check=True, capture_output=True, text=True, timeout=30)
+    except subprocess.CalledProcessError as e:
+        _status(publish_fn, payload, "error", "complete",
+                f"Could not start {unit}: {e.stderr.strip()}")
+        return
+    except Exception as e:
+        logger.error(f"handle_backup error: {e}")
+        _status(publish_fn, payload, "error", "complete", str(e))
+        return
+
+    _status(publish_fn, payload, "running", "started", f"Borg {job} backup started")
+    logger.info(f"Backup command: started {unit}")
+
+    # Wait for the unit to start (up to a minute), then to finish
+    started = time.time()
+    seen_running = False
+    while time.time() - started < BACKUP_TIMEOUT:
+        result, running = borgmatic_metrics.unit_result(unit)
+        if running:
+            seen_running = True
+        elif seen_running or time.time() - started > 60:
+            if result == "success":
+                _status(publish_fn, payload, "success", "complete", f"Borg {job} backup finished")
+            else:
+                _status(publish_fn, payload, "error", "complete",
+                        f"Borg {job} backup {result}; see journalctl -u {unit}")
+            return
+        time.sleep(10)
+    _status(publish_fn, payload, "error", "complete",
+            f"Borg {job} backup still running after {BACKUP_TIMEOUT // 3600} h")
+
+
 # ---------------------------------------------------------------------------
 # Registry — agent.py imports this
 # ---------------------------------------------------------------------------
@@ -192,4 +255,5 @@ COMMAND_REGISTRY = {
     "update":   handle_run_updates,
     "reboot":   handle_reboot,
     "shutdown": handle_shutdown,
+    "backup":   handle_backup,
 }

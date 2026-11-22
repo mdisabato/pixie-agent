@@ -17,7 +17,7 @@ homeassistant:
 #
 # How often each collector runs. Omitted intervals use the top-level
 # "interval" (default 60). system, disk and services always run; the
-# optional collectors (protonvpn, genmon_watchdog) run only when their
+# optional collectors (protonvpn, genmon_watchdog, borgmatic) run only when their
 # section is present here -- an empty section ({}) is enough.
 collectors:
   system:
@@ -28,6 +28,16 @@ collectors:
     interval_seconds: 60
   # protonvpn: {}           # Proton VPN app/tunnel state; defaults to the system interval
   # genmon_watchdog: {}     # genmon process watchdog (restarts genmon.service); defaults to the services interval
+  # borgmatic:              # Borg backup sensors, one set per borgmatic job
+  #   interval_seconds: 60  # how often result and age are published
+  #   refresh_seconds: 900  # how often the repository is read (also right after a job ends)
+  #   jobs:                 # these are also the only jobs the backup command can start
+  #     hourly:
+  #       config: /etc/borgmatic.d/hourly.yaml
+  #       unit: borgmatic-hourly.service
+  #     daily:
+  #       config: /etc/borgmatic.d/daily.yaml
+  #       unit: borgmatic-daily.service
   script:
     interval_seconds: 30
   docker:
@@ -58,3 +68,4 @@ commands:
   allow_shutdown: false
   allow_check: true
   allow_update: false
+  allow_backup: true      # {"action": "backup", "job": "hourly"} starts that borgmatic job's unit
