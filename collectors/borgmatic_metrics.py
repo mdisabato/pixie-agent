@@ -3,7 +3,7 @@
 
 Per job (e.g. "hourly", "daily"):
   - borg_<job>_result        : outcome of the job's systemd unit: running,
-                               success, failed, or unknown (no run since boot)
+                               success, failed, or unknown (no run on record)
   - borg_<job>_last_archive  : time of the newest archive the job made
   - borg_<job>_age_hours     : hours since that archive
   - borg_<job>_archives      : how many archives the job has kept
@@ -14,8 +14,12 @@ Per repository (shared by the jobs that write to it):
 Where each value comes from:
   - result comes from systemd (`systemctl show <unit>`): cheap, takes no Borg
     lock, and sees failed runs, which leave no archive behind. systemd forgets
-    a unit's last run across a reboot, so a job that has not run since boot
-    reports "unknown" until its next run.
+    a unit's last run across a reboot, so for a job that has not run since
+    boot the result comes from the journal instead: the last "Deactivated
+    successfully" or "Failed with result" message systemd logged for the
+    unit. That needs a persistent journal (Storage=persistent in a
+    journald.conf.d drop-in; Raspberry Pi OS defaults to volatile). With no
+    run in the journal either, the result is "unknown".
   - the archive and size values come from borgmatic itself (`list --json`,
     `repo-info --json`), so the repository passphrase stays in the borgmatic
     config. Those calls open the repository, so they run in a background
@@ -64,7 +68,12 @@ _repo_size_gb = None
 _refresh_cfg = {"seconds": 900}
 _last_refresh = 0.0
 _last_exit = {}             # unit -> exit timestamp seen on the previous cycle
+_journal_results = {}       # unit -> result of its last run before this boot
 _refreshing = threading.Lock()
+
+# systemd's catalog IDs for a unit that ended cleanly or failed
+_MSG_UNIT_SUCCESS = "7ad2d189f7e94e70a38c781354912448"
+_MSG_UNIT_FAILURE = "d9b373ed55a64feb8242e02dbe79a49c"
 
 
 # ---------- Config ----------
@@ -131,6 +140,8 @@ def collect(agent):
     for job, cfg in JOBS.items():
         props = _unit_props(cfg["unit"])
         result, running = _result_from(props)
+        if result == "unknown":
+            result = _journal_result(cfg["unit"])
         data[f"borg_{job}_result"] = result
         active = active or running
         # A new exit timestamp means a run ended since the last cycle, even
@@ -162,9 +173,13 @@ def unit_result(unit: str):
     """(result, running) for a systemd unit.
 
     running while the unit is active or starting; success or failed from its
-    last run; unknown when systemd has no run on record (none since boot).
+    last run, taken from the journal when it was before this boot; unknown
+    when there is no run on record at all.
     """
-    return _result_from(_unit_props(unit))
+    result, running = _result_from(_unit_props(unit))
+    if result == "unknown":
+        result = _journal_result(unit)
+    return result, running
 
 
 def _unit_props(unit: str) -> dict:
@@ -191,6 +206,32 @@ def _result_from(props: dict):
     if props.get("ExecMainExitTimestampMonotonic", "0") in ("", "0"):
         return "unknown", False
     return "success", False
+
+
+def _journal_result(unit: str) -> str:
+    """success or failed from the unit's last run in the journal, else unknown.
+
+    Only asked while systemd has no run since boot, so the answer cannot
+    change until the next run, after which systemd has it again. It is
+    looked up once per unit and kept.
+    """
+    if unit in _journal_results:
+        return _journal_results[unit]
+    try:
+        out = subprocess.run(
+            ["journalctl", f"UNIT={unit}",
+             f"MESSAGE_ID={_MSG_UNIT_SUCCESS}", f"MESSAGE_ID={_MSG_UNIT_FAILURE}",
+             "-n", "1", "-o", "json", "--output-fields=MESSAGE_ID", "--no-pager"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout.strip()
+        msg_id = json.loads(out).get("MESSAGE_ID") if out else None
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
+        logging.warning(f"borgmatic: journal lookup for {unit} failed: {e}")
+        return "unknown"        # not kept, so the next cycle tries again
+    result = {_MSG_UNIT_SUCCESS: "success", _MSG_UNIT_FAILURE: "failed"}.get(msg_id, "unknown")
+    _journal_results[unit] = result
+    logging.info(f"borgmatic: {unit} has no run since boot; journal says {result}")
+    return result
 
 
 # ---------- Repository reads (background thread) ----------
