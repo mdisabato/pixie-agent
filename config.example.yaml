@@ -11,6 +11,7 @@ mqtt:
     ca_cert: /opt/pixie-agent/ca.crt  # CA that signed the broker's certificate
   username: CHANGE_ME
   password: CHANGE_ME
+  client_id: pixie-agent-my-pi        # fixed per host and unique; defaults to pixie-agent-<device name>
 #
 homeassistant:
   discovery_prefix: homeassistant

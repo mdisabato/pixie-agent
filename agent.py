@@ -75,8 +75,15 @@ class Agent:
         self.command_topic = f"upd_control/{self.device}/command"
         self.command_status_topic = f"upd_control/{self.device}/status"
 
-        # MQTT setup
-        self.mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        # MQTT setup. The client ID must stay the same across restarts: when a
+        # Pi loses power, the broker still holds its old, dead connection.
+        # Reconnecting under the same ID makes the broker drop that connection,
+        # and publish its last will, before this connection's first "ready".
+        # With a new ID each start, the old will arrives only when the dead
+        # connection's keepalive runs out, often after "ready", and leaves a
+        # stale "unexshutdown" until the next restart.
+        self.client_id = config["mqtt"].get("client_id") or f"pixie-agent-{self.device}"
+        self.mqtt = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.client_id)
         self.mqtt.username_pw_set(
             config["mqtt"]["username"],
             config["mqtt"]["password"],
@@ -114,7 +121,7 @@ class Agent:
             return
         self._connected.set()
 
-        logging.info("MQTT connected")
+        logging.info(f"MQTT connected as {self.client_id}")
 
         # Subscribe to control plane commands
         self.mqtt.subscribe(self.command_topic)
