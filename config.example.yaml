@@ -18,7 +18,7 @@ homeassistant:
 #
 # How often each collector runs. Omitted intervals use the top-level
 # "interval" (default 60). system, disk and services always run; the
-# optional collectors (protonvpn, genmon_watchdog, borgmatic) run only when their
+# optional collectors (protonvpn, genmon_watchdog, borgmatic, ups_events) run only when their
 # section is present here -- an empty section ({}) is enough.
 collectors:
   system:
@@ -39,6 +39,10 @@ collectors:
   #     daily:
   #       config: /etc/borgmatic.d/daily.yaml
   #       unit: borgmatic-daily.service
+  # ups_events:             # UPS transfers to battery, counted from upsmon's journal
+  #   ups:                  # upsmon's UPS name -> sensor key
+  #     "ups@nas.local": ups_1
+  #     "myups@localhost": ups_2
   script:
     interval_seconds: 30
   docker:

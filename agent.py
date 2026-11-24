@@ -19,6 +19,7 @@ from collectors import disk_metrics
 from collectors import service_metrics
 from collectors import genmon_watchdog
 from collectors import borgmatic_metrics
+from collectors import ups_events
 from controllers.rpi_commands import COMMAND_REGISTRY
 
 
@@ -345,6 +346,7 @@ class Agent:
             defaults to the services interval
           - borgmatic: published with the system metrics; defaults to 60s
             (repository reads have their own refresh_seconds)
+          - ups_events: published with the system metrics; defaults to 60s
         """
         default = config.get("interval", 60)
         collectors_cfg = config.get("collectors") or {}
@@ -371,6 +373,10 @@ class Agent:
         if "borgmatic" in collectors_cfg:
             schedule.append(
                 ("borgmatic", borgmatic_metrics, "state", interval("borgmatic", 60))
+            )
+        if "ups_events" in collectors_cfg:
+            schedule.append(
+                ("ups_events", ups_events, "state", interval("ups_events", 60))
             )
         return schedule
 
