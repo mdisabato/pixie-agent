@@ -81,6 +81,14 @@ class DockerMonitor:
         # Previous network stats for rate calculation
         self._prev_net_stats = {}  # {container_id: {'rx': bytes, 'tx': bytes, 'ts': epoch}}
 
+        # Containers this host has published a sensor for: {container name: unique_id}.
+        # Seeded from the retained discovery configs on the broker, so a container that
+        # went away while the monitor was down is still found and removed.
+        self._published = {}
+        self._published_lock = threading.Lock()
+        clean_endpoint = self.device_name.replace('-', '_').replace('.', '_')
+        self._uid_prefix = f"{clean_endpoint}_docker_"
+
         # MQTT client setup
         self.mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         self.mqtt_reconnect_delay = 1
@@ -125,8 +133,36 @@ class DockerMonitor:
         if self.connected:
             self.mqtt_reconnect_delay = 1  # Reset delay on successful connection
             logging.info("Successfully connected to MQTT broker")
+            client.subscribe(f"{self.discovery_prefix}/sensor/+/config", qos=1)
         else:
             logging.error(f"Failed to connect to MQTT broker with code {reason_code}")
+
+    def on_mqtt_message(self, client, userdata, msg) -> None:
+        """Record this host's container sensors from the retained discovery configs."""
+        if not msg.payload:
+            return
+        try:
+            cfg = json.loads(msg.payload)
+        except ValueError:
+            return
+        uid = cfg.get('unique_id', '') if isinstance(cfg, dict) else ''
+        state_topic = cfg.get('state_topic', '') if isinstance(cfg, dict) else ''
+        prefix = f"docker/{self.device_name}/"
+        if uid.startswith(self._uid_prefix) and state_topic.startswith(prefix) and state_topic.endswith('/state'):
+            name = state_topic[len(prefix):-len('/state')]
+            with self._published_lock:
+                self._published[name] = uid
+
+    def remove_container_entity(self, container_name: str, uid: str) -> None:
+        """Clear the retained discovery config and state of a container that no longer exists.
+
+        An empty retained discovery payload makes Home Assistant delete the entity.
+        """
+        base_topic = f"docker/{self.device_name}/{container_name}"
+        for topic in (f"{self.discovery_prefix}/sensor/{uid}/config",
+                      f"{base_topic}/state", f"{base_topic}/attributes"):
+            self.mqtt_client.publish(topic, b"", qos=1, retain=True)
+        logging.info(f"Removed sensor for container {container_name}, which no longer exists")
 
     def on_mqtt_disconnect(self, client, userdata, flags, reason_code, properties) -> None:
         """Callback when MQTT disconnects."""
@@ -148,6 +184,7 @@ class DockerMonitor:
         """Setup MQTT connection with retry logic."""
         self.mqtt_client.on_connect = self.on_mqtt_connect
         self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
+        self.mqtt_client.on_message = self.on_mqtt_message
         
         if self.mqtt_user and self.mqtt_pass:
             self.mqtt_client.username_pw_set(self.mqtt_user, self.mqtt_pass)
@@ -174,7 +211,9 @@ class DockerMonitor:
                     if time.time() - connection_start_time > connection_timeout:
                         raise TimeoutError("Failed to connect within timeout period")
                     time.sleep(0.1)
-                
+
+                # Give the broker a moment to send the retained discovery configs
+                time.sleep(3)
                 return
                 
             except Exception as e:
@@ -356,6 +395,9 @@ class DockerMonitor:
             
             # Publish discovery config for container
             self.publish_discovery_config(endpoint_name, container_name)
+            clean = container_name.replace('-', '_').replace('.', '_').lstrip('/')
+            with self._published_lock:
+                self._published[container_name] = f"{self._uid_prefix}{clean}"
             
             state_data = {
                 "state": container.status.capitalize()
@@ -456,7 +498,18 @@ class DockerMonitor:
                         except Exception as e:
                             logging.error(f"Error processing container on {self.device_name}: {e}")
                             continue
-                        
+
+                    # Remove the sensors of containers that are gone (only after a full,
+                    # successful listing, so a Docker error never deletes anything)
+                    if self.running and self.connected:
+                        current = {c.name for c in containers}
+                        with self._published_lock:
+                            gone = {n: u for n, u in self._published.items() if n not in current}
+                        for name, uid in gone.items():
+                            self.remove_container_entity(name, uid)
+                            with self._published_lock:
+                                self._published.pop(name, None)
+
                 except Exception as e:
                     logging.error(f"Error retrieving containers from {self.device_name}: {str(e)}")
                 
